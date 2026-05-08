@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple
 from multiprocessing import Pool
-from functools import partial
+import functools
 
 import geopandas as gpd
 import numpy as np
@@ -28,15 +28,17 @@ log = logging.getLogger(__name__)
 
 class FireGeometry(NamedTuple):
     """Container for fire polygon geometries."""
+
     geom_sml: np.ndarray  # nominal fire size polygon
     geom_pix: np.ndarray  # pixel footprint polygon
 
 
 class UnionFind:
     """Disjoint-set data structure for efficient grouping.
-    
+
     Replaces the PostgreSQL pnt2grp() aggregate function.
-    Uses path compression and union by rank for near-linear performance.
+
+    Uses path compression and union by rank for nearly O(1) operations.
     """
 
     def __init__(self, n: int):
@@ -76,7 +78,9 @@ class UnionFind:
         # Map roots to smallest ID in each component
         unique_roots = np.unique(roots)
         root_to_min = {r: r for r in unique_roots}
-        component_ids = np.array([root_to_min[roots[i]] for i in range(len(roots))])
+        component_ids = np.array(
+            [root_to_min[roots[i]] for i in range(len(roots))]
+        )
         return component_ids
 
 
@@ -84,11 +88,12 @@ class UnionFind:
 # Fire Geometry Creation
 # ---------------------------------------------------------------------------
 
+
 def create_fire_geometry(
     fire_gdf: gpd.GeoDataFrame,
-    scan_col: str = 'scan',
-    track_col: str = 'track',
-    instrument_col: str = 'instrument',
+    scan_col: str = "scan",
+    track_col: str = "track",
+    instrument_col: str = "instrument",
 ) -> FireGeometry:
     """
     Create fire polygon geometries from detection metadata.
@@ -117,7 +122,7 @@ def create_fire_geometry(
     PIXFAC = 1.1
 
     # Fire size: 1.0 km for MODIS, 0.375 km for VIIRS
-    fire_size = np.where(instrument == 'MODIS', 1.0, 0.375)
+    fire_size = np.where(instrument == "MODIS", 1.0, 0.375)
 
     # Convert km to degrees
     lat_rad = np.radians(lats)
@@ -130,15 +135,19 @@ def create_fire_geometry(
     pix_dy = PIXFAC * 0.5 * track * 360.0 / EARTH_CIRC
 
     # Create bounding box polygons
-    geom_sml = np.array([
-        box(lon - dx, lat - dy, lon + dx, lat + dy)
-        for lon, lat, dx, dy in zip(lons, lats, fire_dx, fire_dy)
-    ])
+    geom_sml = np.array(
+        [
+            box(lon - dx, lat - dy, lon + dx, lat + dy)
+            for lon, lat, dx, dy in zip(lons, lats, fire_dx, fire_dy)
+        ]
+    )
 
-    geom_pix = np.array([
-        box(lon - dx, lat - dy, lon + dx, lat + dy)
-        for lon, lat, dx, dy in zip(lons, lats, pix_dx, pix_dy)
-    ])
+    geom_pix = np.array(
+        [
+            box(lon - dx, lat - dy, lon + dx, lat + dy)
+            for lon, lat, dx, dy in zip(lons, lats, pix_dx, pix_dy)
+        ]
+    )
 
     return FireGeometry(geom_sml=geom_sml, geom_pix=geom_pix)
 
@@ -147,11 +156,12 @@ def create_fire_geometry(
 # Adjacency Detection (replaces tbl_adj_det)
 # ---------------------------------------------------------------------------
 
+
 def find_adjacent_pairs(
     fire_gdf: gpd.GeoDataFrame,
     geom_pix: np.ndarray,
     geom_sml: np.ndarray,
-    date_col: str = 'acq_date',
+    date_col: str = "acq_date",
 ) -> list[tuple[int, int]]:
     """
     Find pairs of detections with overlapping pixel footprints.
@@ -190,10 +200,7 @@ def find_adjacent_pairs(
         # For each detection, find candidates using spatial index
         for local_i, global_i in enumerate(day_indices):
             # Query index for potential overlaps (using envelope)
-            candidates = tree.query(
-                day_pix_geoms[local_i],
-                predicate='intersects'
-            )
+            candidates = tree.query(day_pix_geoms[local_i], predicate="intersects")
 
             for local_j in candidates:
                 if local_i >= local_j:
@@ -203,6 +210,8 @@ def find_adjacent_pairs(
 
                 # Verify actual intersection (not just envelope)
                 if day_pix_geoms[local_i].intersects(day_pix_geoms[local_j]):
+                    # Optional: verify distance criteria from SQL
+                    # This is implicit in the intersection check
                     pairs.append((global_i, global_j))
 
     return pairs
@@ -211,6 +220,7 @@ def find_adjacent_pairs(
 # ---------------------------------------------------------------------------
 # Grouping via Union-Find (replaces pnt2grp())
 # ---------------------------------------------------------------------------
+
 
 def group_detections(
     fire_gdf: gpd.GeoDataFrame,
@@ -258,138 +268,16 @@ def group_detections(
 
 
 # ---------------------------------------------------------------------------
-# Parallel Processing by Date
+# Complete Grouping Pipeline (Sequential)
 # ---------------------------------------------------------------------------
 
-def _group_single_date(
-    day_data: tuple[pd.Timestamp | pd.Timestamp, gpd.GeoDataFrame, FireGeometry]
-) -> tuple[pd.Timestamp, np.ndarray]:
-    """
-    Group detections for a single date (for parallel processing).
-
-    Parameters
-    ----------
-    day_data : tuple of (date, fire_gdf, geom)
-
-    Returns
-    -------
-    (date, fireid_array) for this date
-    """
-    date, gdf_day, geom = day_data
-
-    # Find adjacent pairs for this date only
-    pairs = find_adjacent_pairs(
-        gdf_day,
-        geom.geom_pix,
-        geom.geom_sml,
-        date_col='acq_date',
-    )
-
-    # Group detections
-    fireid = group_detections(gdf_day, pairs)
-
-    return date, fireid
-
-
-def group_fire_detections_parallel(
-    fire_gdf: gpd.GeoDataFrame,
-    scan_col: str = 'scan',
-    track_col: str = 'track',
-    instrument_col: str = 'instrument',
-    date_col: str = 'acq_date',
-    n_workers: int | None = None,
-    verbose: bool = True,
-) -> tuple[np.ndarray, FireGeometry]:
-    """
-    Group detections in parallel by date.
-
-    Uses multiprocessing to process each date independently, then combines results.
-    Useful for large datasets spanning many dates.
-
-    Parameters
-    ----------
-    fire_gdf : GeoDataFrame of fire detections
-    scan_col, track_col, instrument_col, date_col : column names
-    n_workers : number of processes (default: CPU count)
-    verbose : if True, print progress messages
-
-    Returns
-    -------
-    (fireid, geom) : tuple of
-        - fireid : array of group IDs (with global indexing)
-        - geom : FireGeometry with geom_sml and geom_pix
-    """
-    if verbose:
-        log.info(f"Grouping {len(fire_gdf)} detections in parallel...")
-
-    # Create geometries once
-    if verbose:
-        log.info("Creating fire geometries...")
-    geom = create_fire_geometry(
-        fire_gdf,
-        scan_col=scan_col,
-        track_col=track_col,
-        instrument_col=instrument_col,
-    )
-
-    # Prepare data for parallel processing
-    dates = fire_gdf[date_col].unique()
-    if verbose:
-        log.info(f"Processing {len(dates)} dates...")
-
-    worker_data = []
-    date_to_indices = {}
-
-    for date in dates:
-        mask = fire_gdf[date_col] == date
-        indices = np.where(mask)[0]
-        date_to_indices[date] = indices
-
-        gdf_day = fire_gdf[mask].copy()
-        geom_day = FireGeometry(
-            geom_sml=geom.geom_sml[indices],
-            geom_pix=geom.geom_pix[indices],
-        )
-
-        worker_data.append((date, gdf_day, geom_day))
-
-    # Process in parallel
-    with Pool(n_workers) as pool:
-        results = pool.map(_group_single_date, worker_data)
-
-    # Combine results with original global indexing
-    fireid = np.zeros(len(fire_gdf), dtype=np.int64)
-
-    for date, day_fireid in results:
-        indices = date_to_indices[date]
-
-        # Map local fireid back to global indices
-        # Group IDs need to be offset per date to avoid collisions
-        date_offset = indices.min()
-
-        for local_idx, global_idx in enumerate(indices):
-            global_group_id = indices[day_fireid[local_idx]]
-            fireid[global_idx] = global_group_id
-
-    n_groups = len(np.unique(fireid))
-    if verbose:
-        log.info(f"Grouped into {n_groups} fire groups")
-
-    return fireid, geom
-
-
-# ---------------------------------------------------------------------------
-# Complete Grouping Pipeline
-# ---------------------------------------------------------------------------
 
 def group_fire_detections(
     fire_gdf: gpd.GeoDataFrame,
-    scan_col: str = 'scan',
-    track_col: str = 'track',
-    instrument_col: str = 'instrument',
-    date_col: str = 'acq_date',
-    parallel: bool = False,
-    n_workers: int | None = None,
+    scan_col: str = "scan",
+    track_col: str = "track",
+    instrument_col: str = "instrument",
+    date_col: str = "acq_date",
     verbose: bool = True,
 ) -> tuple[np.ndarray, FireGeometry]:
     """
@@ -410,8 +298,6 @@ def group_fire_detections(
         - instrument_col (str, 'MODIS' or 'VIIRS')
         - date_col (date-like)
     scan_col, track_col, instrument_col, date_col : column names
-    parallel : if True, process dates in parallel
-    n_workers : number of processes for parallel mode
     verbose : if True, print progress messages
 
     Returns
@@ -420,17 +306,6 @@ def group_fire_detections(
         - fireid : array of group IDs
         - geom : FireGeometry with geom_sml and geom_pix
     """
-    if parallel:
-        return group_fire_detections_parallel(
-            fire_gdf,
-            scan_col=scan_col,
-            track_col=track_col,
-            instrument_col=instrument_col,
-            date_col=date_col,
-            n_workers=n_workers,
-            verbose=verbose,
-        )
-
     if verbose:
         log.info(f"Grouping {len(fire_gdf)} detections...")
 
@@ -470,15 +345,133 @@ def group_fire_detections(
 
 
 # ---------------------------------------------------------------------------
+# Parallel Processing by Date
+# ---------------------------------------------------------------------------
+
+
+def _group_one_day(
+    date_group_tuple: tuple,
+    scan_col: str = "scan",
+    track_col: str = "track",
+    instrument_col: str = "instrument",
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Worker function for parallel date processing.
+
+    Parameters
+    ----------
+    date_group_tuple : (date, day_gdf) from groupby
+    scan_col, track_col, instrument_col : column names
+
+    Returns
+    -------
+    (indices, fireid_array) for this day
+    """
+    date, day_gdf = date_group_tuple
+    day_gdf = day_gdf.reset_index(drop=True)
+
+    # Create geometries for this day
+    geom = create_fire_geometry(
+        day_gdf,
+        scan_col=scan_col,
+        track_col=track_col,
+        instrument_col=instrument_col,
+    )
+
+    # Find pairs within this day
+    pairs = []
+    if len(day_gdf) >= 2:
+        tree = STRtree(geom.geom_pix)
+        for local_i in range(len(day_gdf)):
+            candidates = tree.query(geom.geom_pix[local_i], predicate="intersects")
+            for local_j in candidates:
+                if local_i < local_j and geom.geom_pix[local_i].intersects(
+                    geom.geom_pix[local_j]
+                ):
+                    pairs.append((local_i, local_j))
+
+    # Group detections for this day
+    fireid_day = group_detections(day_gdf, pairs)
+
+    return day_gdf.index.to_numpy(), fireid_day
+
+
+def group_fire_detections_parallel(
+    fire_gdf: gpd.GeoDataFrame,
+    scan_col: str = "scan",
+    track_col: str = "track",
+    instrument_col: str = "instrument",
+    date_col: str = "acq_date",
+    n_workers: int | None = None,
+    verbose: bool = True,
+) -> tuple[np.ndarray, FireGeometry]:
+    """
+    Parallel grouping by processing each date independently.
+
+    Parameters
+    ----------
+    fire_gdf : GeoDataFrame of fire detections
+    scan_col, track_col, instrument_col, date_col : column names
+    n_workers : number of parallel workers (default: CPU count)
+    verbose : if True, print progress messages
+
+    Returns
+    -------
+    (fireid, geom) : same as group_fire_detections()
+    """
+    if verbose:
+        log.info(f"Grouping {len(fire_gdf)} detections (parallel by date)...")
+
+    # Create geometries once for all dates
+    if verbose:
+        log.info("Creating fire geometries...")
+    geom = create_fire_geometry(
+        fire_gdf,
+        scan_col=scan_col,
+        track_col=track_col,
+        instrument_col=instrument_col,
+    )
+
+    # Group by date for parallel processing
+    date_groups = list(fire_gdf.groupby(date_col))
+    n_dates = len(date_groups)
+
+    if verbose:
+        log.info(f"Processing {n_dates} dates in parallel...")
+
+    # Process each date in parallel
+    with Pool(n_workers) as pool:
+        worker_fn = functools.partial(
+            _group_one_day,
+            scan_col=scan_col,
+            track_col=track_col,
+            instrument_col=instrument_col,
+        )
+        results = pool.map(worker_fn, date_groups)
+
+    # Merge results
+    fireid = np.zeros(len(fire_gdf), dtype=np.int64)
+    for indices, fireid_day in results:
+        fireid[indices] = fireid_day
+
+    n_groups = len(np.unique(fireid))
+    if verbose:
+        log.info(f"Grouped into {n_groups} fire groups")
+
+    return fireid, geom
+
+
+# ---------------------------------------------------------------------------
 # Integration with GeoDataFrame
 # ---------------------------------------------------------------------------
 
+
 def add_fire_groups_to_gdf(
     fire_gdf: gpd.GeoDataFrame,
-    scan_col: str = 'scan',
-    track_col: str = 'track',
-    instrument_col: str = 'instrument',
-    date_col: str = 'acq_date',
+    scan_col: str = "scan",
+    track_col: str = "track",
+    instrument_col: str = "instrument",
+    date_col: str = "acq_date",
     parallel: bool = False,
     n_workers: int | None = None,
 ) -> gpd.GeoDataFrame:
@@ -491,8 +484,8 @@ def add_fire_groups_to_gdf(
     ----------
     fire_gdf : GeoDataFrame to augment
     scan_col, track_col, instrument_col, date_col : column names
-    parallel : if True, process dates in parallel
-    n_workers : number of processes for parallel mode
+    parallel : if True, use parallel processing by date
+    n_workers : number of parallel workers (default: CPU count)
 
     Returns
     -------
@@ -501,23 +494,31 @@ def add_fire_groups_to_gdf(
     result = fire_gdf.copy()
 
     # Get grouping results
-    fireid, geom = group_fire_detections(
-        result,
-        scan_col=scan_col,
-        track_col=track_col,
-        instrument_col=instrument_col,
-        date_col=date_col,
-        parallel=parallel,
-        n_workers=n_workers,
-    )
+    if parallel:
+        fireid, geom = group_fire_detections_parallel(
+            result,
+            scan_col=scan_col,
+            track_col=track_col,
+            instrument_col=instrument_col,
+            date_col=date_col,
+            n_workers=n_workers,
+        )
+    else:
+        fireid, geom = group_fire_detections(
+            result,
+            scan_col=scan_col,
+            track_col=track_col,
+            instrument_col=instrument_col,
+            date_col=date_col,
+        )
 
     # Add to GeoDataFrame
-    result['fireid'] = fireid
-    result['geom_sml'] = geom.geom_sml
-    result['geom_pix'] = geom.geom_pix
+    result["fireid"] = fireid
+    result["geom_sml"] = geom.geom_sml
+    result["geom_pix"] = geom.geom_pix
 
     # Calculate ndetect1 (count of detections per group)
-    ndetect1 = result.groupby('fireid').size()
-    result['ndetect1'] = result['fireid'].map(ndetect1)
+    ndetect1 = result.groupby("fireid").size()
+    result["ndetect1"] = result["fireid"].map(ndetect1)
 
     return result
