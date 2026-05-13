@@ -26,6 +26,7 @@ import pandas as pd
 from af_import_geopandas import load as load_af_data
 from fire_grouping import add_fire_groups_to_gdf
 from fire_vegetation_matcher import process_fires_to_vegetation
+from finn2_calc_emissions_v25 import finn2_calc_emissions
 
 # Configure logging
 logging.basicConfig(
@@ -307,6 +308,27 @@ def print_summary(fire_polys: gpd.GeoDataFrame) -> None:
     if 'v_bare' in fire_polys.columns:
         log.info(f"  Bare cover: {fire_polys['v_bare'].notna().sum():,}/{len(fire_polys):,}")
     log.info(f"{'='*70}\n")
+
+import sys
+import os
+
+
+def process_fires(fire_data, config):
+    """Calculate emissions of compounds using the fire polygons and corresponding vegetation."""
+    
+    # Calculate emissions using the v2.5 routine
+    print(f"Calculating emissions for {len(fire_polygons_with_veg)} fire events...")
+    
+    # This routine typically requires the fire/veg dataframe, 
+    # emission factor tables, and fuel loading data.
+    emissions_results = finn2_calc_emissions(
+        fire_polygons_with_veg,
+        ef_file=config['ef_table_path'],
+        fuel_file=config['fuel_load_path'],
+        output_file=emissions_output_file
+    )
+    
+    return emissions_results
 
 
 # ---------------------------------------------------------------------------
