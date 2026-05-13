@@ -43,12 +43,12 @@ def x_finn2_calc_emissions_v2_5(file_in, simid, year_emis, date_lab, todaydate, 
     
     #**************
     # Standard input files (Fuel loads, EFs)
-    file_fuelloads = '/data14a/FINN/finnv2.3/FINN2_inputs/Fuel_LOADS_NEW_022019.csv' 
-    file_usfuel = '/data14a/FINN/finnv2.3/FINN2_inputs/LCTFuelLoad_fuel4_revisit20190521.csv'
-    file_efs = '/data14a/FINN/finnv2.4/EFs_byGenVeg_c20210601.csv'
-    file_VOCsplit_M = '/data14a/FINN/finnv2.4/NMOCfrac_byGenVeg_MOZ.csv'
-    file_VOCsplit_S = '/data14a/FINN/finnv2.4/NMOCfrac_byGenVeg_SAPRC.csv'
-    file_VOCsplit_G = '/data14a/FINN/finnv2.4/NMOCfrac_byGenVeg_GEOSCHEM.csv'
+    file_fuelloads = 'finn_run_data/Fuel_LOADS_NEW_022019.csv' 
+    file_usfuel = 'finn_run_data/LCTFuelLoad_fuel4_revisit20190521.csv'
+    file_efs = 'finn_run_data/EFs_byGenVeg_c20210601.csv'
+    file_VOCsplit_M = 'finn_run_data/NMOCfrac_byGenVeg_MOZ.csv'
+    file_VOCsplit_S = 'finn_run_data/NMOCfrac_byGenVeg_SAPRC.csv'
+    file_VOCsplit_G = 'finn_run_data/NMOCfrac_byGenVeg_GEOSCHEM.csv'
     
     #  READ IN FUEL LOADING FILE: fuel loads for 5 veg types, for 13 regions
     #  ALL FUEL INPUTS ARE IN g/m2 [-1 for missing values]
@@ -749,14 +749,14 @@ def finn2_calc_emissions_v25():
     # for year in range(2002, 2008):
     for year in range(2008, 2021):
         syr = f"{year}"
-        path_in = '/data14a/FINN/processed_fires_finn2.5/'
+        path_in = 'processed_fires_finn2.5/'
         # file_in = path_in + 'fires_modvrs_merged_' + syr + '.csv'
         file_in = path_in + 'fires_mod_merged_' + syr + '.csv'
         
         # simid = 'modvrs_v2.5'
         simid = 'mod'
         
-        path_out = '/data14a/FINN/finnv2.5/emissions/'
+        path_out = 'emissions/'
         
         print(f'--------- Starting processing of {year} {simid} ---------')
         
